@@ -11,6 +11,8 @@ const VENDOR_SOURCES = [
   { sheet: 'Honeymoon Vendor Sourcing', kind: 'Honeymoon', visible: false }
 ];
 
+const ACTIVE_VENDOR_SOURCES = VENDOR_SOURCES.filter(s => s.visible !== false);
+
 const VIRTUAL_NAV = [
   { route: '_today', label: 'Today', order: 0 },
   { route: '_overview', label: 'Overview', order: 5 },
@@ -60,6 +62,7 @@ const state = {
   schema: [],
   route: null,
   data: {},
+  dataTime: {},
   search: {},
   filter: {},
   expanded: null,
@@ -98,7 +101,27 @@ async function apiGetOverview(force) {
   }
   return res;
 }
+
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+// Any write to one of these sheets changes what buildOverview() returns
+// in the backend. When one of them is written to, the cached __overview
+// payload must be discarded so the Overview page — and the Budget tab's
+// "Available" card — never show stale numbers.
+const OVERVIEW_SHEETS = new Set([
+  '_app_meta',
+  'Team',
+  'Guest List',
+  'budget_flat',
+  'Planning Schedule',
+  'Bridal List',
+  'Wedding Vendor Sourcing',
+  'Rentals Tracker',
+  'Gifts Received',
+  'Cash Contributions',
+  'Things to take back to new home'
+]);
 
 async function apiGetRows(sheetName, force) {
   const now = Date.now();
@@ -139,14 +162,9 @@ async function apiWrite(action, sheetName, data, id, row) {
 
     // Anything that feeds the Overview payload must also blow away the
     // cached __overview, otherwise the UI keeps showing stale data for
-    // up to CACHE_TTL_MS (5 minutes).
-    const affectsOverview =
-      action === 'updateTeam' ||
-      action === 'deleteTeam' ||
-      action === 'createTeam' ||
-      sheetName === '_app_meta';
-
-    if (affectsOverview) {
+    // up to CACHE_TTL_MS (5 minutes). Team actions arrive with
+    // sheetName === 'Team', so no separate action check is needed.
+    if (OVERVIEW_SHEETS.has(sheetName)) {
       delete state.data.__overview;
       delete state.dataTime?.['__overview'];
     }
@@ -786,9 +804,12 @@ async function renderToday() {
     const dateField = pRoles.dateField || 'DUE DATE';
 
     const open = plan.filter(r => !isChecked(r[doneField]) && r[dateField]);
-    const overdue = open.filter(r => (daysUntil(r[dateField]) ?? 1) < 0);
+    // `open` is already filtered to rows with a non-empty dateField.
+    // Unparseable values come back from daysUntil() as null — treat
+    // them as "no deadline" rather than as overdue.
+    const overdue = open.filter(r => { const d = daysUntil(r[dateField]); return d !== null && d < 0; });
     const dueToday = open.filter(r => daysUntil(r[dateField]) === 0);
-    const dueWeek = open.filter(r => { const d = daysUntil(r[dateField]); return d != null && d > 0 && d <= 7; });
+    const dueWeek = open.filter(r => { const d = daysUntil(r[dateField]); return d !== null && d > 0 && d <= 7; });
     const dueSoon = [...dueToday, ...dueWeek];
 
     // Guests pending response
@@ -1367,7 +1388,6 @@ async function renderBudget(schema) {
     const getA = r => num(pick(r, 'actual', 'Actual', 'Actual Cost'));
     const getD = r => num(pick(r, 'deposit', 'Deposit', 'Paid', 'Deposit Made'));
     const sectionOf = r => pick(r, 'section', 'Section', '_section') || 'Other';
-    const itemOf = r => pick(r, 'item', 'Item', roles.nameField);
 
     const totalBudgeted = rows.reduce((s, r) => s + getB(r), 0);
     const totalActual = rows.reduce((s, r) => s + getA(r), 0);
@@ -1396,7 +1416,7 @@ async function renderBudget(schema) {
           ? ov.stats.budget_available
           : null;
         const hint = available == null
-          ? 'Budget!B19 minus deposits'
+          ? 'Budget!B20 minus deposits'
           : (available < 0 ? 'over budget' : 'cash on hand');
         return renderStats([
           { label: 'Budgeted', value: money(totalBudgeted) },
@@ -1854,13 +1874,13 @@ function renderGiftRow(row, schema, { nameCol, amountCol, thankCol, dateCol }) {
 async function renderVendors() {
   setStatus('Loading vendors…');
   try {
-    const results = await Promise.all(VENDOR_SOURCES.map(s => apiGetRows(s.sheet)));
+    const results = await Promise.all(ACTIVE_VENDOR_SOURCES.map(s => apiGetRows(s.sheet)));
 
     const vendors = [];
     results.forEach((res, i) => {
       if (res.error) return;
       (res.rows || []).forEach(r => {
-        vendors.push(normalizeVendor(r, VENDOR_SOURCES[i]));
+        vendors.push(normalizeVendor(r, ACTIVE_VENDOR_SOURCES[i]));
       });
     });
 
@@ -2094,7 +2114,7 @@ async function renderSearch() {
   setStatus('Searching…');
   const sources = [
     ...state.schema.filter(s => s.type === 'data').map(s => s.sheet),
-    ...VENDOR_SOURCES.map(s => s.sheet)
+    ...ACTIVE_VENDOR_SOURCES.map(s => s.sheet)
   ];
   const unique = Array.from(new Set(sources));
 
@@ -2133,7 +2153,13 @@ async function renderSearch() {
         return `<h2>${escapeHtml(sch ? sch.label : r.sheet)} <span class="pill">${r.matches.length}</span></h2>
           <div class="ql-list">
             ${r.matches.slice(0, 10).map(row => {
-          // Show only non-empty fields in preview
+          // Prefer the schema's configured nameField; fall back to the
+          // first non-underscore key if the schema doesn't declare one.
+          const nameKey = (sch && sch.nameField)
+            || Object.keys(row).find(k => k !== '_row')
+            || '';
+          const nameVal = nameKey ? row[nameKey] : '';
+
           const preview = Object.entries(row)
             .filter(([k, v]) => k !== '_row' && v != null && v !== '' && String(v).length < 60)
             .slice(0, 3)
@@ -2142,7 +2168,7 @@ async function renderSearch() {
           return `<div class="ql-row" style="cursor:default">
                 <div class="ql-row-main">
                   <div class="ql-row-info">
-                    <div class="ql-row-name">${escapeHtml(String(row[Object.keys(row)[1]] || '—'))}</div>
+                    <div class="ql-row-name">${escapeHtml(String(nameVal || '—'))}</div>
                     <div class="ql-row-meta">${preview}</div>
                   </div>
                 </div>
