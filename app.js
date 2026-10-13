@@ -29,7 +29,7 @@ const SUBTITLES = {
   '_search': 'Searching across every sheet',
 
   'Planning Schedule': 'Every task, from proposal to after-party',
-  'Bridal List': 'Dowry, ceremony items, and traditions — grouped by section',
+  'Bridal List': 'Dowry, ceremony items, and traditions',
   'Rentals Tracker': "What we're borrowing, and when it goes back",
   'budget_flat': 'Every naira in, every naira out',
   'Guest List': "Who's coming, who's pending, who needs a hotel",
@@ -1422,55 +1422,82 @@ async function renderBudget(schema) {
       bySection[sec].items.push(r);
     });
 
+    // If the sheet has no real section labels, every row lands in a
+    // single bucket called "Other". In that case, skip the section
+    // cards altogether and render one flat list.
+    const sectionKeys = Object.keys(bySection);
+    const isFlat = sectionKeys.length === 0
+      || (sectionKeys.length === 1 && sectionKeys[0] === 'Other');
+
+    const statsHtml = (() => {
+      const ov = state.data.__overview || {};
+      const available = (ov.stats && typeof ov.stats.budget_available === 'number')
+        ? ov.stats.budget_available
+        : null;
+      const hint = available == null
+        ? 'Budget!B20 minus deposits'
+        : (available < 0 ? 'over budget' : 'cash on hand');
+      return renderStats([
+        { label: 'Budgeted', value: money(totalBudgeted) },
+        { label: 'Actual cost', value: money(totalActual) },
+        { label: 'Paid', value: money(totalPaid) },
+        { label: 'Outstanding', value: money(outstanding) },
+        { label: 'Available', value: available == null ? '—' : money(available), hint }
+      ]);
+    })();
+
+    // Helper: renders a list of budget items, hiding items past the
+    // first 10 behind a "+ N more" expander (same as before).
+    const renderItemList = (items) => items.map((it, i) => {
+      const el = renderBudgetItem(it, rows, schema);
+      if (i < 10) return el;
+      return el.replace('class="budget-item', 'class="budget-item hidden-until-expand');
+    }).join('');
+
+    const bodyHtml = isFlat
+      ? `
+        <div class="section-card">
+          <div class="section-items">
+            ${renderItemList(rows)}
+            ${rows.length > 10
+        ? `<div class="more more-expand">+ ${rows.length - 10} more</div>`
+        : ''}
+          </div>
+        </div>`
+      : `
+        <h2>Sections</h2>
+        <div class="section-cards">
+          ${Object.entries(bySection).map(([name, sec]) => {
+        const used = sec.budgeted ? (sec.actual / sec.budgeted) * 100 : 0;
+        const over = sec.actual > sec.budgeted && sec.budgeted > 0;
+        return `<div class="section-card">
+              <div class="section-name">${escapeHtml(name)}</div>
+              <div class="section-numbers">
+                <span class="spent">${money(sec.actual)}</span>
+                <span class="muted">of ${money(sec.budgeted)}</span>
+              </div>
+              ${renderProgress(used, '')}
+              ${over ? `<div class="over-badge">Over by ${money(sec.actual - sec.budgeted)}</div>` : ''}
+              <div class="section-items">
+                ${renderItemList(sec.items)}
+                ${sec.items.length > 10
+            ? `<div class="more more-expand">+ ${sec.items.length - 10} more</div>`
+            : ''}
+              </div>
+            </div>`;
+      }).join('')}
+        </div>`;
+
     $('#view').innerHTML = `
       <div class="toolbar">
         <h1>${escapeHtml(schema.label)}</h1>
         <button class="btn btn-primary" id="bd-add">+ Add expense</button>
       </div>
-      ${(() => {
-        const ov = state.data.__overview || {};
-        const available = (ov.stats && typeof ov.stats.budget_available === 'number')
-          ? ov.stats.budget_available
-          : null;
-        const hint = available == null
-          ? 'Budget!B20 minus deposits'
-          : (available < 0 ? 'over budget' : 'cash on hand');
-        return renderStats([
-          { label: 'Budgeted', value: money(totalBudgeted) },
-          { label: 'Actual cost', value: money(totalActual) },
-          { label: 'Paid', value: money(totalPaid) },
-          { label: 'Outstanding', value: money(outstanding) },
-          { label: 'Available', value: available == null ? '—' : money(available), hint }
-        ]);
-      })()}
+      ${statsHtml}
       ${renderProgress(totalActual ? (totalPaid / totalActual) * 100 : 0, 'Paid so far')}
       <div id="bd-add-strip"></div>
-      <h2>Sections</h2>
-      <div class="section-cards">
-        ${Object.entries(bySection).map(([name, sec]) => {
-        const used = sec.budgeted ? (sec.actual / sec.budgeted) * 100 : 0;
-        const over = sec.actual > sec.budgeted && sec.budgeted > 0;
-        return `<div class="section-card">
-            <div class="section-name">${escapeHtml(name)}</div>
-            <div class="section-numbers">
-              <span class="spent">${money(sec.actual)}</span>
-              <span class="muted">of ${money(sec.budgeted)}</span>
-            </div>
-            ${renderProgress(used, '')}
-            ${over ? `<div class="over-badge">Over by ${money(sec.actual - sec.budgeted)}</div>` : ''}
-<div class="section-items">
-  ${sec.items.map((it, i) => {
-          const hiddenClass = i >= 5 ? ' hidden-until-expand' : '';
-          return renderBudgetItem(it, rows, schema).replace(
-            'class="budget-item',
-            `class="budget-item${hiddenClass}`
-          );
-        }).join('')}
-  ${sec.items.length > 5 ? `<div class="more more-expand">+ ${sec.items.length - 5} more</div>` : ''}
-</div>
-          </div>`;
-      }).join('')}
-      </div>`;
+      ${bodyHtml}
+    `;
 
     // Resolve real column names once — reused by the quick-add form below.
     const cols = schema.columns || [];
