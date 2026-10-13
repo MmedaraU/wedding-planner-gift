@@ -348,19 +348,36 @@ function optionsForColumn(schema, columnName) {
 const SKIP_AS_HEADER = /^(budgeted cost|actual cost|deposit made|deposit made\/money spent|outstanding balance|date last deposit was made|date next deposit is due|notes|total|sub-?total|grand total)\b/i;
 
 function attachSections(rows, roles) {
-  let currentSection = '';
   const out = [];
   rows.forEach(r => {
+    // Keep rows that carry any real data anywhere.
+    const hasAnyData = Object.keys(r).some(k => {
+      if (k === '_row') return false;
+      const v = r[k];
+      return v !== '' && v !== null && v !== undefined && v !== false;
+    });
+    if (!hasAnyData) return;
+
     const raw = r[roles.nameField];
     const name = raw == null ? '' : String(raw).trim();
-    if (!name) return;
-    if (/^(sub-?total|total|grand total)\b/i.test(name)) return;
-    if (SKIP_AS_HEADER.test(name)) return;
-    const noCheckbox = r[roles.checkField] === '' || r[roles.checkField] === false || r[roles.checkField] == null;
-    const hasLetters = /[A-Za-z]/.test(name);
-    const isAllCaps = hasLetters && name === name.toUpperCase();
-    if (isAllCaps && noCheckbox) { currentSection = name; return; }
-    out.push({ ...r, _section: currentSection });
+
+    // Skip explicit totals / grand totals when they're labelled.
+    if (name && /^(sub-?total|total|grand total)\b/i.test(name)) return;
+
+    // Skip budget sub-header rows ("Budgeted Cost" etc.) if any survive.
+    if (name && SKIP_AS_HEADER.test(name)) return;
+
+    // (Section-header detection is a no-op now that the labels are gone,
+    //  but keep it so other sheets — Planning Schedule, Rentals — still
+    //  work exactly as before.)
+    if (name) {
+      const noCheckbox = r[roles.checkField] === '' || r[roles.checkField] === false || r[roles.checkField] == null;
+      const hasLetters = /[A-Za-z]/.test(name);
+      const isAllCaps = hasLetters && name === name.toUpperCase();
+      if (isAllCaps && noCheckbox) return;
+    }
+
+    out.push({ ...r, _section: '' });
   });
   return out;
 }
